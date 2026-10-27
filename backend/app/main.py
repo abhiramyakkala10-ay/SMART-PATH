@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import heapq
+import json
 from functools import lru_cache
 from itertools import count
 from typing import Any, Dict, List
@@ -252,76 +253,215 @@ def build_route_payload(graph: nx.MultiDiGraph, path: List[Any], mode: str, rout
     }
 
 
-def get_osrm_fallback(request: RouteRequest, mode: str) -> Dict[str, Any]:
-    if mode != "drive":
-        raise HTTPException(
-            status_code=503,
-            detail="OpenStreetMap route data is temporarily unavailable. The backup router currently supports driving routes only.",
+def decode_polyline(encoded: str, precision: int = 6) -> List[List[float]]:
+    coordinates: List[List[float]] = []
+    latitude = 0
+    longitude = 0
+    index = 0
+    scale = 10**precision
+
+    while index < len(encoded):
+        deltas = []
+        for _ in range(2):
+            result = 0
+            shift = 0
+            while True:
+                if index >= len(encoded):
+                    raise ValueError("Malformed encoded route geometry")
+                value = ord(encoded[index]) - 63
+                index += 1
+                result |= (value & 0x1F) << shift
+                shift += 5
+                if value < 0x20:
+                    break
+            deltas.append(~(result >> 1) if result & 1 else result >> 1)
+
+        latitude += deltas[0]
+        longitude += deltas[1]
+        coordinates.append([latitude / scale, longitude / scale])
+
+    return coordinates
+
+
+def build_valhalla_route_payload(
+    trip: Dict[str, Any],
+    rank: int,
+    mode: str,
+) -> Dict[str, Any]:
+    summary = trip.get("summary", {})
+    legs = trip.get("legs", [])
+    if not isinstance(summary, dict) or not isinstance(legs, list):
+        raise ValueError("Invalid route summary")
+
+    coordinates: List[List[float]] = []
+    for leg in legs:
+        if not isinstance(leg, dict) or not isinstance(leg.get("shape"), str):
+            raise ValueError("Invalid route geometry")
+        leg_coordinates = decode_polyline(leg["shape"])
+        coordinates.extend(leg_coordinates[1:] if coordinates else leg_coordinates)
+
+    if len(coordinates) < 2:
+        raise ValueError("Route geometry has fewer than two points")
+
+    distance_meters = float(summary["length"]) * 1000
+    duration_minutes = float(summary["time"]) / 60
+    name = "Route 1" if rank == 1 else f"Alternative {rank - 1}"
+    return {
+        "id": f"route-{rank}",
+        "name": name,
+        "rank": rank,
+        "color": ["#C9A24A", "#E4C675", "#A8843B", "#F0DDA8", "#8F6A2B"][(rank - 1) % 5],
+        "coordinates": coordinates,
+        "distance_meters": round(distance_meters, 1),
+        "duration_minutes": round(duration_minutes, 2),
+        "segments": [],
+        "description": f"{mode.title()} route from the public routing service.",
+    }
+
+
+def get_valhalla_fallback(request: RouteRequest, mode: str) -> Dict[str, Any]:
+    costing = {"drive": "auto", "bike": "bicycle", "walk": "pedestrian"}[mode]
+    alternatives_count = max(1, min(request.alternatives, 3))
+    payload = {
+        "locations": [
+            {"lat": request.source.lat, "lon": request.source.lon},
+            {"lat": request.destination.lat, "lon": request.destination.lon},
+        ],
+        "costing": costing,
+        "units": "kilometers",
+        "alternates": min(alternatives_count - 1, 2),
+    }
+    try:
+        response = requests.get(
+            "https://valhalla1.openstreetmap.de/route",
+            params={"json": json.dumps(payload, separators=(",", ":"))},
+            timeout=20,
+            headers={"User-Agent": "SmartPath/1.0 (routing demo)"},
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Valhalla routing is unavailable.") from exc
+
+    if not isinstance(data, dict) or not isinstance(data.get("trip"), dict):
+        raise HTTPException(status_code=503, detail="Valhalla did not return a route.")
+
+    trips = [data["trip"]]
+    alternates = data.get("alternates", [])
+    if isinstance(alternates, list):
+        trips.extend(
+            item.get("trip", item)
+            for item in alternates
+            if isinstance(item, dict)
         )
 
+    try:
+        route_payloads = [
+            build_valhalla_route_payload(trip, index + 1, mode)
+            for index, trip in enumerate(trips[:alternatives_count])
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Valhalla returned invalid route data.") from exc
+
+    return route_response(request, mode, route_payloads, [])
+
+
+def get_osrm_fallback(request: RouteRequest, mode: str) -> Dict[str, Any]:
+    profile = {"drive": "car", "bike": "bike", "walk": "foot"}[mode]
     url = (
-        "https://router.project-osrm.org/route/v1/driving/"
+        f"https://routing.openstreetmap.de/routed-{profile}/route/v1/driving/"
         f"{request.source.lon},{request.source.lat};{request.destination.lon},{request.destination.lat}"
     )
     try:
         response = requests.get(
             url,
-            params={"overview": "full", "geometries": "geojson", "steps": "false"},
-            timeout=15,
+            params={
+                "overview": "full",
+                "geometries": "geojson",
+                "steps": "false",
+                "alternatives": max(1, min(request.alternatives, 3)),
+            },
+            timeout=20,
             headers={"User-Agent": "SmartPath/1.0 (routing demo)"},
         )
         response.raise_for_status()
         data = response.json()
-    except requests.exceptions.RequestException as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Route services are temporarily unavailable. Please try again shortly.",
-        ) from exc
+    except (requests.exceptions.RequestException, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="OSRM routing is unavailable.") from exc
 
-    if not isinstance(data, dict):
-        raise HTTPException(
-            status_code=503,
-            detail="The backup routing service returned an invalid response. Please try again shortly.",
-        )
+    if not isinstance(data, dict) or data.get("code") != "Ok":
+        raise HTTPException(status_code=503, detail="OSRM did not return a route.")
+
     routes = data.get("routes", [])
-    route = routes[0] if routes else None
-    geometry = route.get("geometry", {}) if isinstance(route, dict) else {}
-    coordinates = geometry.get("coordinates", []) if isinstance(geometry, dict) else []
-    if data.get("code") != "Ok" or not isinstance(route, dict) or not coordinates:
-        raise HTTPException(
-            status_code=503,
-            detail="No driving route is available for these locations right now. Please try again shortly.",
-        )
+    if not isinstance(routes, list):
+        raise HTTPException(status_code=503, detail="OSRM returned invalid route data.")
 
-    try:
-        distance_meters = float(route["distance"])
-        duration_minutes = float(route["duration"]) / 60
-        route_coordinates = [[float(latitude), float(longitude)] for longitude, latitude in coordinates]
-    except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="The backup routing service returned an invalid route. Please try again shortly.",
-        ) from exc
+    route_payloads = []
+    for rank, route in enumerate(routes[: max(1, min(request.alternatives, 3))], start=1):
+        if not isinstance(route, dict):
+            continue
+        geometry = route.get("geometry", {})
+        coordinates = geometry.get("coordinates", []) if isinstance(geometry, dict) else []
+        try:
+            route_coordinates = [[float(latitude), float(longitude)] for longitude, latitude in coordinates]
+            distance_meters = float(route["distance"])
+            duration_minutes = float(route["duration"]) / 60
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="OSRM returned invalid route data.") from exc
+        if len(route_coordinates) < 2:
+            continue
+        route_payloads.append({
+            "id": f"route-{rank}",
+            "name": "Route 1" if rank == 1 else f"Alternative {rank - 1}",
+            "rank": rank,
+            "color": ["#C9A24A", "#E4C675", "#A8843B", "#F0DDA8", "#8F6A2B"][(rank - 1) % 5],
+            "coordinates": route_coordinates,
+            "distance_meters": round(distance_meters, 1),
+            "duration_minutes": round(duration_minutes, 2),
+            "segments": [],
+            "description": f"{mode.title()} route from the public routing service.",
+        })
 
-    route_payload = {
-        "id": "route-1",
-        "name": "Route 1 (backup)",
-        "rank": 1,
-        "color": "#C9A24A",
-        "coordinates": route_coordinates,
-        "distance_meters": round(distance_meters, 1),
-        "duration_minutes": round(duration_minutes, 2),
-        "segments": [],
-        "description": "Driving route provided by the backup routing service.",
-    }
+    if not route_payloads:
+        raise HTTPException(status_code=503, detail="OSRM did not return a usable route.")
+    return route_response(request, mode, route_payloads, [])
+
+
+def route_response(
+    request: RouteRequest,
+    mode: str,
+    routes: List[Dict[str, Any]],
+    steps: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    ranked_routes = sorted(routes, key=lambda route: route["distance_meters"])
+    colors = ["#C9A24A", "#E4C675", "#A8843B"]
+    for rank, route in enumerate(ranked_routes, start=1):
+        route["id"] = f"route-{rank}"
+        route["name"] = "Route 1" if rank == 1 else f"Alternative {rank - 1}"
+        route["rank"] = rank
+        route["color"] = colors[(rank - 1) % len(colors)]
+
     return {
         "source": {"lat": request.source.lat, "lon": request.source.lon},
         "destination": {"lat": request.destination.lat, "lon": request.destination.lon},
         "mode": mode,
-        "routes": [route_payload],
-        "shortest_route": route_payload,
-        "dijkstra_steps": [],
+        "routes": ranked_routes,
+        "shortest_route": ranked_routes[0],
+        "dijkstra_steps": steps,
     }
+
+
+def get_public_router_routes(request: RouteRequest, mode: str) -> Dict[str, Any]:
+    try:
+        return get_valhalla_fallback(request, mode)
+    except HTTPException:
+        try:
+            return get_osrm_fallback(request, mode)
+        except HTTPException as osrm_error:
+            raise HTTPException(
+                status_code=503,
+                detail="Route services are temporarily unavailable. Please try again shortly.",
+            ) from osrm_error
 
 
 def overpass_has_capacity() -> bool:
@@ -378,19 +518,19 @@ def geocode_location(query: str = Query(..., min_length=2)) -> SearchResponse:
 def compute_routes(request: RouteRequest) -> Dict[str, Any]:
     mode = normalize_mode(request.mode)
     if not overpass_has_capacity():
-        return get_osrm_fallback(request, mode)
+        return get_public_router_routes(request, mode)
 
     try:
         graph = get_graph_for_points(request.source, request.destination, mode)
     except (ox._errors.ResponseStatusCodeError, requests.exceptions.RequestException):
-        return get_osrm_fallback(request, mode)
+        return get_public_router_routes(request, mode)
 
     if graph.number_of_nodes() == 0:
         raise HTTPException(status_code=404, detail="No road network was found for the selected coordinates.")
 
     source_node = ox.nearest_nodes(graph, request.source.lon, request.source.lat)
     destination_node = ox.nearest_nodes(graph, request.destination.lon, request.destination.lat)
-    alternatives_count = max(1, min(request.alternatives, 5))
+    alternatives_count = max(1, min(request.alternatives, 3))
 
     if source_node == destination_node:
         shortest_path = [source_node]
@@ -406,7 +546,7 @@ def compute_routes(request: RouteRequest) -> Dict[str, Any]:
             try:
                 graph = get_graph_for_points(request.source, request.destination, mode, radius_factor=1.35)
             except (ox._errors.ResponseStatusCodeError, requests.exceptions.RequestException):
-                return get_osrm_fallback(request, mode)
+                return get_public_router_routes(request, mode)
             if graph.number_of_nodes() == 0:
                 raise HTTPException(status_code=404, detail="No road network was found for the selected coordinates.")
             source_node = ox.nearest_nodes(graph, request.source.lon, request.source.lat)

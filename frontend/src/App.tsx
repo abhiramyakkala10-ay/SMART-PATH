@@ -14,10 +14,7 @@ import {
   Route,
   Search,
   SlidersHorizontal,
-  Sparkles,
-  X,
 } from 'lucide-react';
-import { Area, AreaChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
 
 type LocationDetails = {
   lat: number;
@@ -134,7 +131,7 @@ function App() {
   const [destinationSuggestions, setDestinationSuggestions] = useState<SearchResult[]>([]);
   const [activeSearch, setActiveSearch] = useState<'source' | 'destination' | null>(null);
   const [mode, setMode] = useState('drive');
-  const [alternatives, setAlternatives] = useState(1);
+  const [alternatives, setAlternatives] = useState(3);
   const [selectedTarget, setSelectedTarget] = useState<'source' | 'destination'>('source');
   const [routes, setRoutes] = useState<RouteResult[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
@@ -242,7 +239,7 @@ function App() {
     () =>
       routes.map((route) => ({
         id: route.id,
-        color: ROUTE_COLORS[((route.rank || 1) - 1) % ROUTE_COLORS.length],
+        color: route.color || ROUTE_COLORS[((route.rank || 1) - 1) % ROUTE_COLORS.length],
         coords: route.coordinates,
       })),
     [routes],
@@ -392,16 +389,7 @@ function App() {
   }
 
   const selectedRoute = routes.find((route) => route.id === selectedRouteId) || routes[0];
-
-  const analyticsData = useMemo(
-    () =>
-      routes.map((route, index) => ({
-        name: `R${index + 1}`,
-        distance: Number((route.distance_meters / 1000).toFixed(1)),
-        duration: Number(route.duration_minutes.toFixed(1)),
-      })),
-    [routes],
-  );
+  const modeLabel = mode === 'bike' ? 'Cycling' : mode === 'walk' ? 'Walking' : 'Driving';
 
   const mapCoordinates = selectedRoute?.coordinates || [
     [source.lat, source.lon],
@@ -542,12 +530,12 @@ function App() {
         <div className="brand-lockup">
           <div className="brand-mark"><Navigation size={19} /></div>
           <div>
-            <p className="eyebrow">SMARTPATH <span>/</span> ROUTE INTELLIGENCE</p>
+            <p className="eyebrow">SMARTPATH <span>/</span> CITY ROUTES</p>
             <h1>Move with a better sense of direction.</h1>
           </div>
         </div>
         <div className="header-meta">
-          <span className="live-indicator"><i /> ROUTE ENGINE ONLINE</span>
+          <span className="header-caption">ROAD ROUTES &amp; CITY WALKS</span>
           <span className="location-chip"><MapPinned size={14} /> HYDERABAD, IN</span>
         </div>
       </header>
@@ -708,7 +696,7 @@ function App() {
               <input
                 type="range"
                 min={1}
-                max={5}
+                max={3}
                 value={alternatives}
                 onChange={(event) => setAlternatives(Number(event.target.value))}
                 className="w-full accent-amber-400"
@@ -759,8 +747,9 @@ function App() {
           {routes.length > 0 && (
           <div className="section-card rounded-2xl border border-slate-700 bg-slate-800/60 p-3">
             <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-200">
-              <Sparkles className="h-4 w-4 text-amber-300" />
+              <Route className="h-4 w-4 text-amber-300" />
               Route options
+              <span className="route-count">{routes.length} available</span>
             </div>
             <div className="space-y-3">
                 {routes.map((route) => (
@@ -776,7 +765,7 @@ function App() {
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-2">
-                        <span className="inline-flex h-3 w-3 rounded-full" style={{ backgroundColor: ROUTE_COLORS[((route.rank || 1) - 1) % ROUTE_COLORS.length] }} />
+                        <span className="inline-flex h-3 w-3 rounded-full" style={{ backgroundColor: route.color || ROUTE_COLORS[((route.rank || 1) - 1) % ROUTE_COLORS.length] }} />
                         <span className="text-sm font-semibold text-slate-100">{route.name}</span>
                       </div>
                       <span className="text-[10px] uppercase tracking-[0.25em] text-slate-400">#{route.rank || 1}</span>
@@ -877,7 +866,7 @@ function App() {
 
           <div className="map-legend absolute bottom-4 left-4 z-[500] rounded-2xl border border-slate-700 bg-slate-900/85 p-3 shadow-lg">
             <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-slate-300">
-              <X className="h-3.5 w-3.5 text-slate-400" />
+              <span className="map-legend-mark" />
               Map legend
             </div>
             <div className="space-y-2 text-xs text-slate-200">
@@ -889,63 +878,60 @@ function App() {
         </div>
 
         <div className="route-insights border-t border-slate-700/80 bg-slate-900/70 px-4 py-4 md:px-5">
-          <div className="mb-4 flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Selected route</p>
-              <h3 className="mt-1 text-xl font-semibold text-white">{selectedRoute ? selectedRoute.name : 'No route selected'}</h3>
-            </div>
-            {selectedRoute && (
-              <div className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-right text-sm text-slate-200">
-                <div>{(selectedRoute.distance_meters / 1000).toFixed(1)} km</div>
-                <div className="text-slate-400">{selectedRoute.duration_minutes.toFixed(1)} min</div>
-              </div>
-            )}
-          </div>
-
           <AnimatePresence mode="wait">
-          {selectedRoute && (
-            <motion.div
-              key={selectedRoute.id}
-              className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -5 }}
-              transition={{ duration: 0.24 }}
-            >
-              <div className="insight-card rounded-2xl border border-slate-700 bg-slate-800/70 p-4">
-                <div className="mb-3 text-sm font-medium text-slate-200">Distance breakdown</div>
-                <div className="h-24">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={analyticsData}>
-                      <defs>
-                        <linearGradient id="distanceFill" x1="0" x2="0" y1="0" y2="1">
-                          <stop offset="0%" stopColor="#E4C675" stopOpacity={0.8} />
-                          <stop offset="100%" stopColor="#C9A24A" stopOpacity={0.15} />
-                        </linearGradient>
-                      </defs>
-                      <XAxis dataKey="name" stroke="#94a3b8" tickLine={false} axisLine={false} />
-                      <YAxis stroke="#94a3b8" tickLine={false} axisLine={false} />
-                      <ChartTooltip
-                        contentStyle={{ backgroundColor: '#0f172a', border: '1px solid rgba(148,163,184,0.35)', borderRadius: 12 }}
-                        labelStyle={{ color: '#e2e8f0' }}
-                      />
-                      <Area type="monotone" dataKey="distance" stroke="#C9A24A" fill="url(#distanceFill)" strokeWidth={2.5} />
-                    </AreaChart>
-                  </ResponsiveContainer>
+            {selectedRoute ? (
+              <motion.div
+                key={selectedRoute.id}
+                className="route-summary"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+              >
+                <div className="route-summary-heading">
+                  <div className="route-summary-title">
+                    <span className="route-summary-kicker">SELECTED ROUTE · {modeLabel.toUpperCase()}</span>
+                    <h3>{selectedRoute.name}</h3>
+                  </div>
+                  <div className="route-summary-endpoints">
+                    <div className="route-endpoint">
+                      <span className="route-endpoint-mark is-origin" />
+                      <span>{source.label}</span>
+                    </div>
+                    <span className="route-endpoint-rule" />
+                    <div className="route-endpoint">
+                      <span className="route-endpoint-mark is-destination" />
+                      <span>{destination.label}</span>
+                    </div>
+                  </div>
                 </div>
-              </div>
 
-              <div className="insight-card rounded-2xl border border-slate-700 bg-slate-800/70 p-4">
-                <div className="mb-3 text-sm font-medium text-slate-200">Current route summary</div>
-                <div className="space-y-2 text-sm text-slate-300">
-                  <div className="flex items-center justify-between"><span>Distance</span><strong className="text-white">{(selectedRoute.distance_meters / 1000).toFixed(1)} km</strong></div>
-                  <div className="flex items-center justify-between"><span>Duration</span><strong className="text-white">{selectedRoute.duration_minutes.toFixed(1)} min</strong></div>
-                  <div className="flex items-center justify-between"><span>Mode</span><strong className="text-white">{mode}</strong></div>
-                  <div className="flex items-center justify-between"><span>Points</span><strong className="text-white">{selectedRoute.coordinates.length}</strong></div>
+                <div className="route-summary-metrics">
+                  <div>
+                    <span>Distance</span>
+                    <strong>{(selectedRoute.distance_meters / 1000).toFixed(1)} <small>km</small></strong>
+                  </div>
+                  <div>
+                    <span>Estimated time</span>
+                    <strong>{selectedRoute.duration_minutes.toFixed(1)} <small>min</small></strong>
+                  </div>
+                  <div>
+                    <span>Travel mode</span>
+                    <strong>{modeLabel}</strong>
+                  </div>
                 </div>
-              </div>
-            </motion.div>
-          )}
+              </motion.div>
+            ) : (
+              <motion.div
+                className="route-summary-empty"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+              >
+                <span className="route-summary-kicker">YOUR JOURNEY</span>
+                <p>Choose two places to see the route details here.</p>
+              </motion.div>
+            )}
           </AnimatePresence>
         </div>
       </motion.main>
