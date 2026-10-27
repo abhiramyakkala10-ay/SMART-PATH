@@ -1,0 +1,16 @@
+.venv/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+cache/
+frontend/node_modules/
+frontend/dist/
+frontend/vite.config.js
+frontend/vite.config.d.ts
+*.tsbuildinfo
+auth.json
+.env
+.env.*
+!.env.example
+.DS_Store
+/~/
